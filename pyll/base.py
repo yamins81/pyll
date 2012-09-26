@@ -64,6 +64,18 @@ class SymbolTable(object):
                 o_len=o_len,
                 pure=pure)
 
+    def _new_learning_apply(self, name, args, kwargs, o_len, pure, learn_args, fit_class):
+        pos_args = [as_apply(a) for a in args]
+        named_args = [(k, as_apply(v)) for (k, v) in kwargs.items()]
+        named_args.sort()
+        return LearningApply(name,
+                pos_args=pos_args,
+                named_args=named_args,
+                o_len=o_len,
+                pure=pure,
+                learn_args=learn_args,
+                fit_class=fit_class)
+
     # ----
 
     def dict(self, *args, **kwargs):
@@ -118,14 +130,14 @@ class SymbolTable(object):
 
     # ----
 
-    def define(self, f, o_len=None, pure=False):
+    def define(self, f, o_len=None, pure=False, learn_args=None, fit_class=None):
         """Decorator for adding python functions to self
         """
         name = f.__name__
         if hasattr(self, name):
             raise ValueError('Cannot override existing symbol', name)
 
-        entry = SymbolTableEntry(self, name, o_len, pure)
+        entry = SymbolTableEntry(self, name, o_len, pure, learn_args, fit_class)
         setattr(self, name, entry)
         self._impls[name] = f
         return f
@@ -160,17 +172,30 @@ class SymbolTable(object):
     def import_(self, _globals, *args, **kwargs):
         _globals.update(self.inject(*args, **kwargs))
 
+
 class SymbolTableEntry(object):
     """A functools.partial-like class for adding symbol table entries.
     """
-    def __init__(self, symbol_table, apply_name, o_len, pure):
+    def __init__(self, symbol_table, apply_name, o_len, pure, learn_args, fit_class):
         self.symbol_table = symbol_table
         self.apply_name = apply_name
         self.o_len = o_len
         self.pure = pure
+        self.learn_args = learn_args
+        self.fit_class = fit_class
 
     def __call__(self, *args, **kwargs):
-        return self.symbol_table._new_apply(
+        if learn_args is not None:
+            return self.symbol_table._new_learning_apply(
+                self.apply_name,
+                args,
+                kwargs,
+                self.o_len,
+                self.pure,
+                self.learn_args,
+                self.fit_class)        
+        else:
+            return self.symbol_table._new_apply(
                 self.apply_name,
                 args,
                 kwargs,
@@ -230,6 +255,7 @@ class Apply(object):
         assert all(isinstance(v, Apply) for v in pos_args)
         assert all(isinstance(v, Apply) for k, v in named_args)
         assert all(isinstance(k, basestring) for k, v in named_args)
+
 
     def eval(self, memo=None):
         """
@@ -487,6 +513,57 @@ class Apply(object):
         return scope.call(self, args, kwargs)
 
 
+class LearningApply(Apply):
+    """
+    """
+
+    def __init__(self, 
+            learn_args,
+            fit_class,
+            *args, **kwargs):
+            
+        Apply.__init__(self, *kwargs, **kwargs)
+            
+        self.learn_args = learn_args
+        self._learning_data = None
+        self.learned_from = []
+        self.fit_class = fit_class
+        self.fit_obj = None
+
+        LAs = self.learn_args
+        self.initial_values = []
+        assert isinstance(LAs, tuple) 
+        assert 'fit' not in LAs
+        for la in LAs:
+            lv = self.learn_arg_dict[la]
+            assert isinstance(lv, Literal)
+            self.initial_values.append(clone(lv))
+        
+        self.initialize_fitter()
+        
+    @property
+    def named_arg_dict(self):
+        return dict(self.named_args)
+        
+    @property
+    def learn_arg_dict(self):
+        return dict([(la, self.named_arg_dict[la]) for la in self.learn_args])
+        
+    @property
+    def learn_arg_vals(self):
+        return dict([(la, self.learn_arg_dict[la].eval()) for la in self.learn_args])
+        
+    def initialize_fitter(self):
+        lvs = self.learn_arg_vals
+        self.fit_obj = self.fit_class(**lvs)
+        assert hasattr(self.fit_obj, 'fit')
+        for la in self.learn_args:
+            assert getattr(self.fit_obj, la) == self.named_args[la].eval()
+        for inp in self.inputs():
+            if isinstance(inp, LearningApply):
+                inp.initialize_fitter()    
+
+                    
 def apply(name, *args, **kwargs):
     pos_args = [as_apply(a) for a in args]
     named_args = [(k, as_apply(v)) for (k, v) in kwargs.items()]
@@ -728,6 +805,34 @@ def clone_merge(expr, memo=None, merge_literals=False):
 
 class GarbageCollected(object):
     '''Placeholder representing a garbage-collected value '''
+
+
+def rec_learn(node, memo=None):
+    if memo is None:
+        memo = {}
+    else:
+        memo = dict(memo)
+    
+    learn_nodes = self.learn_arg_dict.values()
+    for inp in node.inputs():
+        if isinstance(inp, LearningApply):
+            rec_learn(inp, memo=memo)
+        elif inp not in learn_nodes:
+            rec_eval(inp, memo=memo) 
+
+    args = _args = [memo[v] for v in node.pos_args]
+    kwargs = _kwargs = dict([(k, memo[v])
+        for (k, v) in node.named_args])
+
+    node.fit_obj.fit(*args, **kwargs)
+    
+    for la in node.learn_args:
+        nv = getattr(node.fit_obj, la)
+        lv = Literal(nv)
+        ov = node.learn_arg_dict[la]
+        node.replace_input(ov, lv)
+    
+    rec_eval(node, memo=memo)
 
 
 def rec_eval(expr, deepcopy_inputs=False, memo=None,

@@ -145,9 +145,9 @@ class SymbolTable(object):
     def define_pure(self, f):
         return self.define(f, o_len=None, pure=True)
 
-    def define_info(self, o_len=None, pure=False):
+    def define_info(self, o_len=None, pure=False, learn_args=None, fit_class=None):
         def wrapper(f):
-            return self.define(f, o_len=o_len, pure=pure)
+            return self.define(f, o_len=o_len, pure=pure, learn_args=learn_args, fit_class=fit_class)
         return wrapper
 
     def inject(self, *args, **kwargs):
@@ -185,7 +185,7 @@ class SymbolTableEntry(object):
         self.fit_class = fit_class
 
     def __call__(self, *args, **kwargs):
-        if learn_args is not None:
+        if self.learn_args is not None:
             return self.symbol_table._new_learning_apply(
                 self.apply_name,
                 args,
@@ -242,8 +242,7 @@ class Apply(object):
     """
 
     def __init__(self, name, pos_args, named_args,
-            o_len=None,
-            pure=False):
+            o_len=None, pure=False):
         self.name = name
         # -- tuples or arrays -> lists
         self.pos_args = list(pos_args)
@@ -517,13 +516,13 @@ class LearningApply(Apply):
     """
     """
 
-    def __init__(self, 
-            learn_args,
-            fit_class,
-            *args, **kwargs):
+    def __init__(self, name, pos_args, named_args,
+            learn_args, fit_class,
+            o_len=None, pure=False):
             
-        Apply.__init__(self, *kwargs, **kwargs)
-            
+        Apply.__init__(self, name, pos_args, named_args,
+                       o_len=o_len, pure=pure)
+        
         self.learn_args = learn_args
         self._learning_data = None
         self.learned_from = []
@@ -558,7 +557,7 @@ class LearningApply(Apply):
         self.fit_obj = self.fit_class(**lvs)
         assert hasattr(self.fit_obj, 'fit')
         for la in self.learn_args:
-            assert getattr(self.fit_obj, la) == self.named_args[la].eval()
+            assert getattr(self.fit_obj, la) == self.learn_arg_dict[la].eval()
         for inp in self.inputs():
             if isinstance(inp, LearningApply):
                 inp.initialize_fitter()    
@@ -810,19 +809,18 @@ class GarbageCollected(object):
 def rec_learn(node, memo=None):
     if memo is None:
         memo = {}
-    else:
-        memo = dict(memo)
     
-    learn_nodes = self.learn_arg_dict.values()
+    learn_nodes = node.learn_arg_dict.values()
     for inp in node.inputs():
         if isinstance(inp, LearningApply):
             rec_learn(inp, memo=memo)
         elif inp not in learn_nodes:
-            rec_eval(inp, memo=memo) 
+        #else:
+            memo[inp] = rec_eval(inp, memo=memo) 
 
     args = _args = [memo[v] for v in node.pos_args]
     kwargs = _kwargs = dict([(k, memo[v])
-        for (k, v) in node.named_args])
+        for (k, v) in node.named_args if v not in learn_nodes])
 
     node.fit_obj.fit(*args, **kwargs)
     
@@ -832,7 +830,7 @@ def rec_learn(node, memo=None):
         ov = node.learn_arg_dict[la]
         node.replace_input(ov, lv)
     
-    rec_eval(node, memo=memo)
+    memo[node] = rec_eval(node, memo=memo)
 
 
 def rec_eval(expr, deepcopy_inputs=False, memo=None,

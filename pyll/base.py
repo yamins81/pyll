@@ -418,6 +418,17 @@ class Apply(object):
                 self.named_args[ii][1] = new_node
                 rval.append(ii + len(self.pos_args))
         return rval
+        
+    @property
+    def named_arg_dict(self):
+        return dict(self.named_args)
+        
+    def replace_inputs(self, old_nodes, new_nodes):
+        T = toposort(self)
+        for o, n in zip(old_nodes, new_nodes):
+            I = [t for t in T if o in t.inputs()]
+            for i in I:
+                i.replace_input(o, n)
 
     def pprint(self, ofile, lineno=None, indent=0, memo=None):
         if memo is None:
@@ -524,8 +535,6 @@ class LearningApply(Apply):
                        o_len=o_len, pure=pure)
         
         self.learn_args = learn_args
-        self._learning_data = None
-        self.learned_from = []
         self.fit_class = fit_class
         self.fit_obj = None
 
@@ -536,17 +545,31 @@ class LearningApply(Apply):
         for la in LAs:
             lv = self.learn_arg_dict[la]
             assert isinstance(lv, Literal)
-            self.initial_values.append(clone(lv))
+            self.initial_values.append(lv.eval())
         
         self.initialize_fitter()
         
     @property
-    def named_arg_dict(self):
-        return dict(self.named_args)
-        
-    @property
     def learn_arg_dict(self):
         return dict([(la, self.named_arg_dict[la]) for la in self.learn_args])
+        
+    @property
+    def all_learn_nodes(self):
+        x = []
+        for ln in self.inputs():
+            if isinstance(ln, LearningApply):
+                x.extend(ln.all_learn_nodes)
+        x.extend(self.learn_arg_dict.values())
+        return x
+        
+    @property
+    def leaves(self):
+        G = nx.DiGraph()
+        for node in dfs(self):
+             G.add_edges_from([(n_in, node) for n_in in node.inputs()])
+        L = [n for n,d in G.in_degree().items() if d==0]
+        A = self.all_learn_nodes
+        return [n for n in L if n not in A]
         
     @property
     def learn_arg_vals(self):
@@ -561,6 +584,20 @@ class LearningApply(Apply):
         for inp in self.inputs():
             if isinstance(inp, LearningApply):
                 inp.initialize_fitter()    
+
+    def clone_from_inputs(self, inputs, o_len='same'):
+        if len(inputs) != len(self.inputs()):
+            raise TypeError()
+        L = len(self.pos_args)
+        pos_args = list(inputs[:L])
+        named_args = [[kw, inputs[L + ii]]
+                for ii, (kw, arg) in enumerate(self.named_args)]
+        learn_args = self.learn_args
+        fit_class = self.fit_class
+        # -- danger cloning with new inputs can change the o_len
+        if o_len == 'same':
+            o_len = self.o_len
+        return self.__class__(self.name, pos_args, named_args, learn_args, fit_class, o_len)
 
                     
 def apply(name, *args, **kwargs):
@@ -833,6 +870,24 @@ def rec_learn(node, memo=None):
     memo[node] = rec_eval(node, memo=memo)
 
 
+def learn(fn, learn_data, initial_vals_list):
+    """
+    assumes all fns in fnlist have one positional variable 
+    """
+    
+    expr = fn(learn_data, **initial_vals_list)
+    rec_learn(expr)
+    
+    def fn(x):
+        expr0 = clone(expr)
+        L = expr0.leaves
+        assert len(L) == 1
+        l = L[0]
+        expr0.replace_inputs([l], [Literal(x)])
+        return rec_eval(expr0)
+        
+    return fn
+    
 def rec_eval(expr, deepcopy_inputs=False, memo=None,
         max_program_len=None,
         memo_gc=True,

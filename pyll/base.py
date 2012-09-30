@@ -54,7 +54,7 @@ class SymbolTable(object):
                 'getattr': getattr,
                 }
 
-    def _new_apply(self, name, args, kwargs, o_len, pure):
+    def _new_apply(self, name, args, kwargs, o_len, pure, _label):
         pos_args = [as_apply(a) for a in args]
         named_args = [(k, as_apply(v)) for (k, v) in kwargs.items()]
         named_args.sort()
@@ -62,9 +62,10 @@ class SymbolTable(object):
                 pos_args=pos_args,
                 named_args=named_args,
                 o_len=o_len,
-                pure=pure)
+                pure=pure,
+                _label=_label)
 
-    def _new_learning_apply(self, name, args, kwargs, o_len, pure, learn_args, fit_class):
+    def _new_learning_apply(self, name, args, kwargs, o_len, pure, learn_args, fit_class, _label):
         pos_args = [as_apply(a) for a in args]
         named_args = [(k, as_apply(v)) for (k, v) in kwargs.items()]
         named_args.sort()
@@ -74,7 +75,8 @@ class SymbolTable(object):
                 o_len=o_len,
                 pure=pure,
                 learn_args=learn_args,
-                fit_class=fit_class)
+                fit_class=fit_class,
+                _label=_label)
 
     # ----
 
@@ -185,6 +187,7 @@ class SymbolTableEntry(object):
         self.fit_class = fit_class
 
     def __call__(self, *args, **kwargs):
+        _label = kwargs.pop('_label', '')
         if self.learn_args is not None:
             return self.symbol_table._new_learning_apply(
                 self.apply_name,
@@ -193,14 +196,16 @@ class SymbolTableEntry(object):
                 self.o_len,
                 self.pure,
                 self.learn_args,
-                self.fit_class)        
+                self.fit_class,
+                _label)        
         else:
             return self.symbol_table._new_apply(
                 self.apply_name,
                 args,
                 kwargs,
                 self.o_len,
-                self.pure)
+                self.pure,
+                _label)
 
 scope = SymbolTable()
 
@@ -242,7 +247,7 @@ class Apply(object):
     """
 
     def __init__(self, name, pos_args, named_args,
-            o_len=None, pure=False):
+            o_len=None, pure=False, _label=''):
         self.name = name
         # -- tuples or arrays -> lists
         self.pos_args = list(pos_args)
@@ -251,6 +256,7 @@ class Apply(object):
         #    list coersion.
         self.o_len = o_len
         self.pure = pure
+        self._label = _label
         assert all(isinstance(v, Apply) for v in pos_args)
         assert all(isinstance(v, Apply) for k, v in named_args)
         assert all(isinstance(k, basestring) for k, v in named_args)
@@ -395,7 +401,7 @@ class Apply(object):
             self.named_args.append([name, as_apply(value)])
             self.named_args.sort()
 
-    def clone_from_inputs(self, inputs, o_len='same'):
+    def clone_from_inputs(self, inputs, o_len='same', _label='same'):
         if len(inputs) != len(self.inputs()):
             raise TypeError()
         L = len(self.pos_args)
@@ -405,7 +411,9 @@ class Apply(object):
         # -- danger cloning with new inputs can change the o_len
         if o_len == 'same':
             o_len = self.o_len
-        return self.__class__(self.name, pos_args, named_args, o_len)
+        if _label == 'same':
+            _label = self._label
+        return self.__class__(self.name, pos_args, named_args, o_len, _label=_label)
 
     def replace_input(self, old_node, new_node):
         rval = []
@@ -429,6 +437,11 @@ class Apply(object):
             I = [t for t in T if o in t.inputs()]
             for i in I:
                 i.replace_input(o, n)
+
+    def get_node_by_label(self, lbl):
+        T = toposort(self)
+        lbls = [t._label for t in T]
+        return T[lbls.index(lbl)]
 
     def pprint(self, ofile, lineno=None, indent=0, memo=None):
         if memo is None:
@@ -529,10 +542,10 @@ class LearningApply(Apply):
 
     def __init__(self, name, pos_args, named_args,
             learn_args, fit_class,
-            o_len=None, pure=False):
+            o_len=None, pure=False, _label=''):
             
         Apply.__init__(self, name, pos_args, named_args,
-                       o_len=o_len, pure=pure)
+                       o_len=o_len, pure=pure, _label=_label)
         
         self.learn_args = learn_args
         self.fit_class = fit_class
@@ -585,7 +598,7 @@ class LearningApply(Apply):
             if isinstance(inp, LearningApply):
                 inp.initialize_fitter()    
 
-    def clone_from_inputs(self, inputs, o_len='same'):
+    def clone_from_inputs(self, inputs, o_len='same', _label='same'):
         if len(inputs) != len(self.inputs()):
             raise TypeError()
         L = len(self.pos_args)
@@ -597,7 +610,10 @@ class LearningApply(Apply):
         # -- danger cloning with new inputs can change the o_len
         if o_len == 'same':
             o_len = self.o_len
-        return self.__class__(self.name, pos_args, named_args, learn_args, fit_class, o_len)
+        if _label == 'same':
+            _label = self._label
+        return self.__class__(self.name, pos_args, named_args, learn_args, 
+          fit_class, o_len, _label=_label)
 
                     
 def apply(name, *args, **kwargs):
@@ -870,23 +886,46 @@ def rec_learn(node, memo=None):
     memo[node] = rec_eval(node, memo=memo)
 
 
-def learn(fn, learn_data, initial_vals_list):
+def learn(fn, learn_data, initial_vals):
+    """ 
     """
-    assumes all fns in fnlist have one positional variable 
-    """
-    
-    expr = fn(learn_data, **initial_vals_list)
+    expr = fn(learn_data, **initial_vals)
     rec_learn(expr)
+    L = expr.leaves
+    assert len(L) == 1
+    l = L[0]
+    expr = clone(expr, {l: p0})    
+    fn = get_fn(expr)
+    return fn, expr
+    
+    
+def get_fn(expr):
+    L = expr.leaves
+    assert len(L) == 1
+    l = L[0]
     
     def fn(x):
-        expr0 = clone(expr)
-        L = expr0.leaves
-        assert len(L) == 1
-        l = L[0]
-        expr0.replace_inputs([l], [Literal(x)])
+        l = expr.leaves[0]
+        expr0 = clone(expr, {l: Literal(x)})
         return rec_eval(expr0)
         
     return fn
+    
+
+def learnpipe(fnlist, learn_data, initial_vals_list):
+    """ 
+    """
+    
+    expr = learn_data
+    exp_list = []
+    for fn, ival in zip(fnlist, initial_vals_list):
+        expr = fn(**ival)
+        exp_list.append(expr)
+    
+    rec_learn(expr)
+    
+    return [exp.learn_arg_vals for exp in exp_list]
+
     
 def rec_eval(expr, deepcopy_inputs=False, memo=None,
         max_program_len=None,

@@ -54,7 +54,7 @@ class SymbolTable(object):
                 'getattr': getattr,
                 }
 
-    def _new_apply(self, name, args, kwargs, o_len, pure, _label):
+    def _new_apply(self, name, args, kwargs, o_len, pure, _label=None):
         pos_args = [as_apply(a) for a in args]
         named_args = [(k, as_apply(v)) for (k, v) in kwargs.items()]
         named_args.sort()
@@ -65,7 +65,7 @@ class SymbolTable(object):
                 pure=pure,
                 _label=_label)
 
-    def _new_learning_apply(self, name, args, kwargs, o_len, pure, learn_args, fit_class, _label):
+    def _new_learning_apply(self, name, args, kwargs, o_len, pure, learn_args, fit_class, _label=None):
         pos_args = [as_apply(a) for a in args]
         named_args = [(k, as_apply(v)) for (k, v) in kwargs.items()]
         named_args.sort()

@@ -590,7 +590,7 @@ class LearningApply(Apply):
         G = nx.DiGraph()
         for node in dfs(self):
              G.add_edges_from([(n_in, node) for n_in in node.inputs()])
-        L = [n for n,d in G.in_degree().items() if d==0]
+        L = [n for n,d in G.in_degree().items() if d == 0]
         A = self.all_learn_nodes
         return [n for n in L if n not in A]
         
@@ -873,33 +873,37 @@ def rec_learn(node, memo=None):
     if memo is None:
         memo = {}
     
-    learn_nodes = node.learn_arg_dict.values()
+    if hasattr(node, 'learn_arg_dict'):
+        learn_nodes = node.learn_arg_dict.values()
+    else:
+        learn_nodes = []
     for inp in node.inputs():
-        if isinstance(inp, LearningApply):
+        if isinstance(inp, Apply):
             rec_learn(inp, memo=memo)
         elif inp not in learn_nodes:
         #else:
             memo[inp] = rec_eval(inp, memo=memo) 
 
-    args = _args = [memo[v] for v in node.pos_args]
-    kwargs = _kwargs = dict([(k, memo[v])
-        for (k, v) in node.named_args if v not in learn_nodes])
-
-    node.fit_obj.fit(*args, **kwargs)
+    if isinstance(node, LearningApply):
+        args = _args = [memo[v] for v in node.pos_args]
+        kwargs = _kwargs = dict([(k, memo[v])
+            for (k, v) in node.named_args if v not in learn_nodes])
     
-    for la in node.learn_args:
-        nv = getattr(node.fit_obj, la)
-        lv = Literal(nv)
-        ov = node.learn_arg_dict[la]
-        node.replace_input(ov, lv)
+        node.fit_obj.fit(*args, **kwargs)
+        
+        for la in node.learn_args:
+            nv = getattr(node.fit_obj, la)
+            lv = Literal(nv)
+            ov = node.learn_arg_dict[la]
+            node.replace_input(ov, lv)
     
     memo[node] = rec_eval(node, memo=memo)
 
 
-def learn(fn, learn_data, initial_vals):
+def learn(fn, learn_data, params):
     """ 
     """
-    expr = fn(learn_data, **initial_vals)
+    expr = fn(learn_data, **params)
     rec_learn(expr)
     L = expr.leaves
     assert len(L) == 1

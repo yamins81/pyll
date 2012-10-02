@@ -76,6 +76,7 @@ def test_learn():
     assert d == {'a': 4.0, 'b': 0.3}
     
     assert len(expr.get_node_by_label({'type': 'A'})) == 2
+    assert len(expr.get_node_by_label({'type': 'B'})) == 0
     
     return expr
 

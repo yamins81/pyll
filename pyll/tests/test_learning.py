@@ -63,8 +63,8 @@ def test_fn12():
 
 
 def fn12(X, a0, a1, b):
-    A = scope.fn1(X, a=a0, _label='step1')
-    B = scope.fn2(A, a=a1, b=b, _label='step2')
+    A = scope.fn1(X, a=a0, _label={'name': 'step1', 'type': 'A'})
+    B = scope.fn2(A, a=a1, b=b, _label={'name': 'step2', 'type': 'A'})
     return B
 
 
@@ -72,8 +72,10 @@ def test_learn():
     G, expr = learn(fn12, np.zeros((30, 3)), {'a0':1, 'a1':1, 'b':-.2})
     assert (G(np.ones((10, 3))) == 20.3 * np.ones((10, 3))).all()
     
-    d = expr.get_node_by_label('step2').learn_arg_vals
+    d = expr.get_node_by_label({'name': 'step2'})[0].learn_arg_vals
     assert d == {'a': 4.0, 'b': 0.3}
+    
+    assert len(expr.get_node_by_label({'type': 'A'})) == 2
     
     return expr
 

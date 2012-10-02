@@ -439,10 +439,9 @@ class Apply(object):
                 i.replace_input(o, n)
 
     def get_node_by_label(self, lbl):
-        T = toposort(self)
-        lbls = [t._label for t in T]
-        return T[lbls.index(lbl)]
-
+        T = dfs(self)
+        return [t for t in T if label_matches(t._label, lbl)]
+        
     def pprint(self, ofile, lineno=None, indent=0, memo=None):
         if memo is None:
             memo = {}
@@ -534,6 +533,17 @@ class Apply(object):
 
     def __call__(self, *args, **kwargs):
         return scope.call(self, args, kwargs)
+
+
+def label_matches(l, L):
+    for k in L:
+        if k in l:
+            if isinstance(L[k], list):
+                return l[k] in L[k]
+            else:
+                return l[k] == L[k]
+        else:
+            return False
 
 
 class LearningApply(Apply):

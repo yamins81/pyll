@@ -1,5 +1,4 @@
 from base import Apply
-from base import LearningApply
 from base import learn
 from base import Literal
 from base import as_apply

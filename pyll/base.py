@@ -6,6 +6,7 @@
 import copy
 import logging; logger = logging.getLogger(__name__)
 import time
+import itertools
 
 from StringIO import StringIO
 from collections import deque
@@ -54,7 +55,10 @@ class SymbolTable(object):
                 'getattr': getattr,
                 }
 
-    def _new_apply(self, name, args, kwargs, o_len, pure, _label=None):
+    def _new_apply(self, name, args, kwargs, o_len, pure, 
+                            learn_args=(), fit_class=None, _label=None,
+                            compiler=None, compiler_data=None
+                            ):
         pos_args = [as_apply(a) for a in args]
         named_args = [(k, as_apply(v)) for (k, v) in kwargs.items()]
         named_args.sort()
@@ -63,20 +67,11 @@ class SymbolTable(object):
                 named_args=named_args,
                 o_len=o_len,
                 pure=pure,
-                _label=_label)
-
-    def _new_learning_apply(self, name, args, kwargs, o_len, pure, learn_args, fit_class, _label=None):
-        pos_args = [as_apply(a) for a in args]
-        named_args = [(k, as_apply(v)) for (k, v) in kwargs.items()]
-        named_args.sort()
-        return LearningApply(name,
-                pos_args=pos_args,
-                named_args=named_args,
-                o_len=o_len,
-                pure=pure,
                 learn_args=learn_args,
                 fit_class=fit_class,
-                _label=_label)
+                _label=_label,
+                compiler=compiler,
+                compiler_data=compiler_data)
 
     # ----
 
@@ -132,14 +127,14 @@ class SymbolTable(object):
 
     # ----
 
-    def define(self, f, o_len=None, pure=False, learn_args=None, fit_class=None):
+    def define(self, f, o_len=None, pure=False, learn_args=(), fit_class=None, compiler=None):
         """Decorator for adding python functions to self
         """
         name = f.__name__
         if hasattr(self, name):
             raise ValueError('Cannot override existing symbol', name)
 
-        entry = SymbolTableEntry(self, name, o_len, pure, learn_args, fit_class)
+        entry = SymbolTableEntry(self, name, o_len, pure, learn_args, fit_class, compiler=compiler)
         setattr(self, name, entry)
         self._impls[name] = f
         return f
@@ -147,9 +142,9 @@ class SymbolTable(object):
     def define_pure(self, f):
         return self.define(f, o_len=None, pure=True)
 
-    def define_info(self, o_len=None, pure=False, learn_args=None, fit_class=None):
+    def define_info(self, o_len=None, pure=False, learn_args=(), fit_class=None, compiler=None):
         def wrapper(f):
-            return self.define(f, o_len=o_len, pure=pure, learn_args=learn_args, fit_class=fit_class)
+            return self.define(f, o_len=o_len, pure=pure, learn_args=learn_args, fit_class=fit_class, compiler=compiler)
         return wrapper
 
     def inject(self, *args, **kwargs):
@@ -178,34 +173,31 @@ class SymbolTable(object):
 class SymbolTableEntry(object):
     """A functools.partial-like class for adding symbol table entries.
     """
-    def __init__(self, symbol_table, apply_name, o_len, pure, learn_args, fit_class):
+    def __init__(self, symbol_table, apply_name, o_len, pure, 
+                 learn_args, fit_class, compiler):
         self.symbol_table = symbol_table
         self.apply_name = apply_name
         self.o_len = o_len
         self.pure = pure
         self.learn_args = learn_args
         self.fit_class = fit_class
+        self.compiler = compiler
 
     def __call__(self, *args, **kwargs):
         _label = kwargs.pop('_label', '')
-        if self.learn_args is not None:
-            return self.symbol_table._new_learning_apply(
-                self.apply_name,
-                args,
-                kwargs,
-                self.o_len,
-                self.pure,
-                self.learn_args,
-                self.fit_class,
-                _label)        
-        else:
-            return self.symbol_table._new_apply(
-                self.apply_name,
-                args,
-                kwargs,
-                self.o_len,
-                self.pure,
-                _label)
+        compiler_data = kwargs.pop('_compiler_data', ())
+
+        return self.symbol_table._new_apply(
+            self.apply_name,
+            args,
+            kwargs,
+            o_len=self.o_len,
+            pure=self.pure,
+            learn_args=self.learn_args,
+            fit_class=self.fit_class,
+            _label=_label,
+            compiler=self.compiler,
+            compiler_data=compiler_data)        
 
 scope = SymbolTable()
 
@@ -216,9 +208,9 @@ def as_apply(obj):
     if isinstance(obj, Apply):
         rval = obj
     elif isinstance(obj, tuple):
-        rval = Apply('pos_args', [as_apply(a) for a in obj], {}, len(obj))
+        rval = Apply('pos_args', [as_apply(a) for a in obj], {}, o_len=len(obj))
     elif isinstance(obj, list):
-        rval = Apply('pos_args', [as_apply(a) for a in obj], {}, None)
+        rval = Apply('pos_args', [as_apply(a) for a in obj], {}, o_len=None)
     elif isinstance(obj, dict):
         items = obj.items()
         # -- should be fine to allow numbers and simple things
@@ -227,7 +219,7 @@ def as_apply(obj):
         items.sort()
         if all(isinstance(k, basestring) for k in obj):
             named_args = [(k, as_apply(v)) for (k, v) in items]
-            rval = Apply('dict', [], named_args, len(named_args))
+            rval = Apply('dict', [], named_args, o_len=len(named_args))
         else:
             new_items = [(k, as_apply(v)) for (k, v) in items]
             rval = Apply('dict', [as_apply(new_items)], {}, o_len=None)
@@ -247,7 +239,9 @@ class Apply(object):
     """
 
     def __init__(self, name, pos_args, named_args,
-            o_len=None, pure=False, _label=''):
+            learn_args=(), fit_class=None, compiler=None, compiler_data=None,
+            o_len=None, pure=False, _label=None):
+            
         self.name = name
         # -- tuples or arrays -> lists
         self.pos_args = list(pos_args)
@@ -256,10 +250,31 @@ class Apply(object):
         #    list coersion.
         self.o_len = o_len
         self.pure = pure
+        if _label is None:
+            _label = {}
+        if compiler_data is None:
+            compiler_data = ()
+        self.compiler_data = compiler_data
         self._label = _label
         assert all(isinstance(v, Apply) for v in pos_args)
         assert all(isinstance(v, Apply) for k, v in named_args)
         assert all(isinstance(k, basestring) for k, v in named_args)
+
+        self.compiler = compiler
+        self.learn_args = learn_args
+        self.fit_class = fit_class
+        self.fit_obj = None
+        
+        LAs = self.learn_args
+        self.initial_values = []
+        assert isinstance(LAs, tuple), LAs
+        assert 'fit' not in LAs
+        for la in LAs:
+            lv = self.learn_arg_dict[la]
+            assert isinstance(lv, Literal)
+            self.initial_values.append(lv.eval())
+        
+        self.initialize_fitter()
 
 
     def eval(self, memo=None):
@@ -401,20 +416,30 @@ class Apply(object):
             self.named_args.append([name, as_apply(value)])
             self.named_args.sort()
 
-    def clone_from_inputs(self, inputs, o_len='same', _label='same'):
+    def clone_from_inputs(self, inputs, learn_args='same', fit_class='same',
+                          o_len='same', _label='same'):
         if len(inputs) != len(self.inputs()):
             raise TypeError()
         L = len(self.pos_args)
         pos_args = list(inputs[:L])
         named_args = [[kw, inputs[L + ii]]
                 for ii, (kw, arg) in enumerate(self.named_args)]
+        
+        if learn_args == 'same':
+            learn_args = self.learn_args
+        if fit_class == 'same':
+            fit_class = self.fit_class
         # -- danger cloning with new inputs can change the o_len
         if o_len == 'same':
             o_len = self.o_len
         if _label == 'same':
             _label = self._label
-        return self.__class__(self.name, pos_args, named_args, o_len, _label=_label)
-
+        return self.__class__(self.name, pos_args, named_args, 
+                              learn_args=learn_args, 
+                              fit_class=fit_class, 
+                              o_len=o_len, 
+                              _label=_label)
+          
     def replace_input(self, old_node, new_node):
         rval = []
         for ii, aa in enumerate(self.pos_args):
@@ -461,6 +486,54 @@ class Apply(object):
                 print >> ofile, lineno[0], ' ' * indent + ' ' + name + ' ='
                 lineno[0] += 1
                 arg.pprint(ofile, lineno, indent + 2, memo)
+
+    @property
+    def learn_arg_dict(self):
+        return dict([(la, self.named_arg_dict[la]) for la in self.learn_args])
+        
+    @property
+    def all_learn_nodes(self):
+        x = []
+        for ln in self.inputs():
+            if isinstance(ln, Apply):
+                x.extend(ln.all_learn_nodes)
+        x.extend(self.learn_arg_dict.values())
+        return x
+              
+    def bnodes(self):
+        n = []
+        for inp in self.inputs():
+            if inp.name != 'partial':
+                n.extend(inp.bnodes())
+        n.append(self)
+        return n
+        
+    @property
+    def leaves(self):
+        G = nx.DiGraph()
+        #for node in self.bnodes():
+            #G.add_edges_from([(n_in, node) for n_in in node.inputs() if n_in.name != 'partial'])
+        for node in dfs(self):
+            G.add_edges_from([(n_in, node) for n_in in node.inputs()])
+        L = [n for n,d in G.in_degree().items() if d == 0]
+        A = self.all_learn_nodes
+        return [n for n in L if n not in A]
+        
+    @property
+    def learn_arg_vals(self):
+        return dict([(la, self.learn_arg_dict[la].eval()) for la in self.learn_args])
+        
+    def initialize_fitter(self):
+        if self.fit_class is not None:
+            lvs = self.learn_arg_vals
+            self.fit_obj = self.fit_class(**lvs)
+            assert hasattr(self.fit_obj, 'fit')
+            for la in self.learn_args:
+                assert getattr(self.fit_obj, la) == self.learn_arg_dict[la].eval()
+        for inp in self.inputs():
+            if isinstance(inp, Apply):
+                inp.initialize_fitter()    
+
 
     def __str__(self):
         sio = StringIO()
@@ -545,86 +618,6 @@ def label_matches(l, L):
         else:
             return False
 
-
-class LearningApply(Apply):
-    """
-    """
-
-    def __init__(self, name, pos_args, named_args,
-            learn_args, fit_class,
-            o_len=None, pure=False, _label=''):
-            
-        Apply.__init__(self, name, pos_args, named_args,
-                       o_len=o_len, pure=pure, _label=_label)
-        
-        self.learn_args = learn_args
-        self.fit_class = fit_class
-        self.fit_obj = None
-
-        LAs = self.learn_args
-        self.initial_values = []
-        assert isinstance(LAs, tuple) 
-        assert 'fit' not in LAs
-        for la in LAs:
-            lv = self.learn_arg_dict[la]
-            assert isinstance(lv, Literal)
-            self.initial_values.append(lv.eval())
-        
-        self.initialize_fitter()
-        
-    @property
-    def learn_arg_dict(self):
-        return dict([(la, self.named_arg_dict[la]) for la in self.learn_args])
-        
-    @property
-    def all_learn_nodes(self):
-        x = []
-        for ln in self.inputs():
-            if isinstance(ln, LearningApply):
-                x.extend(ln.all_learn_nodes)
-        x.extend(self.learn_arg_dict.values())
-        return x
-        
-    @property
-    def leaves(self):
-        G = nx.DiGraph()
-        for node in dfs(self):
-             G.add_edges_from([(n_in, node) for n_in in node.inputs()])
-        L = [n for n,d in G.in_degree().items() if d == 0]
-        A = self.all_learn_nodes
-        return [n for n in L if n not in A]
-        
-    @property
-    def learn_arg_vals(self):
-        return dict([(la, self.learn_arg_dict[la].eval()) for la in self.learn_args])
-        
-    def initialize_fitter(self):
-        lvs = self.learn_arg_vals
-        self.fit_obj = self.fit_class(**lvs)
-        assert hasattr(self.fit_obj, 'fit')
-        for la in self.learn_args:
-            assert getattr(self.fit_obj, la) == self.learn_arg_dict[la].eval()
-        for inp in self.inputs():
-            if isinstance(inp, LearningApply):
-                inp.initialize_fitter()    
-
-    def clone_from_inputs(self, inputs, o_len='same', _label='same'):
-        if len(inputs) != len(self.inputs()):
-            raise TypeError()
-        L = len(self.pos_args)
-        pos_args = list(inputs[:L])
-        named_args = [[kw, inputs[L + ii]]
-                for ii, (kw, arg) in enumerate(self.named_args)]
-        learn_args = self.learn_args
-        fit_class = self.fit_class
-        # -- danger cloning with new inputs can change the o_len
-        if o_len == 'same':
-            o_len = self.o_len
-        if _label == 'same':
-            _label = self._label
-        return self.__class__(self.name, pos_args, named_args, learn_args, 
-          fit_class, o_len, _label=_label)
-
                     
 def apply(name, *args, **kwargs):
     pos_args = [as_apply(a) for a in args]
@@ -642,7 +635,7 @@ class Literal(Apply):
             o_len = len(obj)
         except TypeError:
             o_len = None
-        Apply.__init__(self, 'literal', [], {}, o_len, pure=True)
+        Apply.__init__(self, 'literal', pos_args=(), named_args={}, o_len=o_len, pure=True, fit_class=None, learn_args=(), compiler=None)
         self._obj = obj
 
     def eval(self, memo=None):
@@ -880,15 +873,24 @@ def rec_learn(node, memo=None):
     for inp in node.inputs():
         if isinstance(inp, Apply):
             rec_learn(inp, memo=memo)
-        elif inp not in learn_nodes:
+        #elif inp not in learn_nodes:
         #else:
-            memo[inp] = rec_eval(inp, memo=memo) 
+        #    memo[inp] = rec_eval(inp, memo=memo) 
 
-    if isinstance(node, LearningApply):
+    if node.fit_obj is not None and node not in memo:
         args = _args = [memo[v] for v in node.pos_args]
         kwargs = _kwargs = dict([(k, memo[v])
             for (k, v) in node.named_args if v not in learn_nodes])
-    
+                            
+        if node.compiler:
+            for v in node.pos_args:
+                memo.pop(v)
+            compiler_data = node.compiler_data
+            compiler = node.compiler
+            pargs = tuple(node.pos_args) + compiler_data
+            args = compiler(*pargs)
+            args = rec_eval(args, memo=memo)
+                
         node.fit_obj.fit(*args, **kwargs)
         
         for la in node.learn_args:
@@ -896,6 +898,7 @@ def rec_learn(node, memo=None):
             lv = Literal(nv)
             ov = node.learn_arg_dict[la]
             node.replace_input(ov, lv)
+    
     
     memo[node] = rec_eval(node, memo=memo)
 
@@ -906,7 +909,7 @@ def learn(fn, learn_data, params):
     expr = fn(learn_data, **params)
     rec_learn(expr)
     L = expr.leaves
-    assert len(L) == 1
+    assert len(L) == 1, L
     l = L[0]
     expr = clone(expr, {l: p0})    
     fn = get_fn(expr)

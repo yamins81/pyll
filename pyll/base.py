@@ -881,16 +881,7 @@ def rec_learn(node, memo=None):
         args = _args = [memo[v] for v in node.pos_args]
         kwargs = _kwargs = dict([(k, memo[v])
             for (k, v) in node.named_args if v not in learn_nodes])
-                            
-        if node.compiler:
-            for v in node.pos_args:
-                memo.pop(v)
-            compiler_data = node.compiler_data
-            compiler = node.compiler
-            pargs = tuple(node.pos_args) + compiler_data
-            args = compiler(*pargs)
-            args = rec_eval(args, memo=memo)
-                
+                                            
         node.fit_obj.fit(*args, **kwargs)
         
         for la in node.learn_args:
@@ -898,9 +889,24 @@ def rec_learn(node, memo=None):
             lv = Literal(nv)
             ov = node.learn_arg_dict[la]
             node.replace_input(ov, lv)
+            memo[lv] = nv
     
-    
-    memo[node] = rec_eval(node, memo=memo)
+    if node.compiler and node not in memo:
+        print('compiling', node, node.name)
+        args = _args = [memo[v] for v in node.pos_args]
+        kwargs = _kwargs = dict([(k, memo[v])
+            for (k, v) in node.named_args])
+            
+        compiler = node.compiler
+        compiler_data = node.compiler_data
+        f, dnode = compiler_data 
+        try:
+            data = memo[dnode]
+        except:
+            data = rec_eval(dnode)
+        memo[node] = rec_eval(compiler(f, args, kwargs, data))
+    else:
+        memo[node] = rec_eval(node, memo=memo)
 
 
 def learn(fn, learn_data, params):

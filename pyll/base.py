@@ -56,8 +56,8 @@ class SymbolTable(object):
                 }
 
     def _new_apply(self, name, args, kwargs, o_len, pure, 
-                            learn_args=(), fit_class=None, _label=None,
-                            compiler=None, compiler_data=None
+                            learn_args=(), fit_class=None, fit_kwargs=None,
+                            _label=None, compiler=None, compiler_data=None
                             ):
         pos_args = [as_apply(a) for a in args]
         named_args = [(k, as_apply(v)) for (k, v) in kwargs.items()]
@@ -69,6 +69,7 @@ class SymbolTable(object):
                 pure=pure,
                 learn_args=learn_args,
                 fit_class=fit_class,
+                fit_kwargs=fit_kwargs,
                 _label=_label,
                 compiler=compiler,
                 compiler_data=compiler_data)
@@ -185,6 +186,7 @@ class SymbolTableEntry(object):
 
     def __call__(self, *args, **kwargs):
         _label = kwargs.pop('_label', '')
+        fit_kwargs = kwargs.pop('fit_kwargs', {})
         compiler_data = kwargs.pop('_compiler_data', ())
 
         return self.symbol_table._new_apply(
@@ -195,6 +197,7 @@ class SymbolTableEntry(object):
             pure=self.pure,
             learn_args=self.learn_args,
             fit_class=self.fit_class,
+            fit_kwargs=fit_kwargs,
             _label=_label,
             compiler=self.compiler,
             compiler_data=compiler_data)        
@@ -239,7 +242,8 @@ class Apply(object):
     """
 
     def __init__(self, name, pos_args, named_args,
-            learn_args=(), fit_class=None, compiler=None, compiler_data=None,
+            learn_args=(), fit_class=None, fit_kwargs=None,
+            compiler=None, compiler_data=None,
             o_len=None, pure=False, _label=None):
             
         self.name = name
@@ -263,6 +267,9 @@ class Apply(object):
         self.compiler = compiler
         self.learn_args = learn_args
         self.fit_class = fit_class
+        if fit_kwargs is None:
+            fit_kwargs = {}
+        self.fit_kwargs = fit_kwargs
         self.fit_obj = None
         
         LAs = self.learn_args
@@ -417,6 +424,7 @@ class Apply(object):
             self.named_args.sort()
 
     def clone_from_inputs(self, inputs, learn_args='same', fit_class='same',
+                          fit_kwargs='same',  
                           o_len='same', _label='same'):
         if len(inputs) != len(self.inputs()):
             raise TypeError()
@@ -434,9 +442,12 @@ class Apply(object):
             o_len = self.o_len
         if _label == 'same':
             _label = self._label
+        if fit_kwargs == 'same':
+            fit_kwargs = self.fit_kwargs
         return self.__class__(self.name, pos_args, named_args, 
                               learn_args=learn_args, 
                               fit_class=fit_class, 
+                              fit_kwargs=fit_kwargs,
                               o_len=o_len, 
                               _label=_label)
           
@@ -525,11 +536,13 @@ class Apply(object):
         
     def initialize_fitter(self):
         if self.fit_class is not None:
+            fit_kwargs = self.fit_kwargs
             lvs = self.learn_arg_vals
-            self.fit_obj = self.fit_class(**lvs)
+            fit_kwargs.update(lvs)
+            self.fit_obj = self.fit_class(**fit_kwargs)
             assert hasattr(self.fit_obj, 'fit')
             for la in self.learn_args:
-                assert getattr(self.fit_obj, la) == self.learn_arg_dict[la].eval()
+                assert hasattr(self.fit_obj, la)
         for inp in self.inputs():
             if isinstance(inp, Apply):
                 inp.initialize_fitter()    
@@ -899,7 +912,8 @@ def rec_learn(node, memo=None):
             
         compiler = node.compiler
         compiler_data = node.compiler_data
-        f, dnode = compiler_data 
+        dnode = compiler_data 
+        f = getattr(scope, node.name) 
         try:
             data = memo[dnode]
         except:
